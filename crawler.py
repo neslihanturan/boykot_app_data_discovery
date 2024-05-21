@@ -1,82 +1,100 @@
-from flask import json
 import requests
+from urllib.parse import urlparse
+from flask import json
+
 from bs4 import BeautifulSoup
 
-def get_holding_json():
+def get_holding_links():
     # Wikipedia sayfasının URL'si
     url = "https://tr.wikipedia.org/wiki/T%C3%BCrkiye%27deki_holding_%C5%9Firketler"
 
-    # Sayfa içeriğini alma
+    # Sayfanın içeriğini çek
     response = requests.get(url)
-    html_content = response.content
+    soup = BeautifulSoup(response.content, "html.parser")
 
-    # HTML içeriğini parse etme
-    soup = BeautifulSoup(html_content, 'html.parser')
+    # Türkiye'deki holding şirketler listesini bul
+    list_section = soup.find("span", id="Türkiye'deki_holding_şirketler_listesi").parent
 
-    # Holding şirketler listesini bulma
-    holding_sirketler = []
-    # Sayfada genellikle <ul> (unordered list) ve <li> (list item) kullanılır.
-    for ul in soup.find_all('ul'):
-        for li in ul.find_all('li'):
-            # Burada, her <li> öğesinin metin içeriğini listeye ekliyoruz.
-            holding_sirketler.append(li.get_text())
+    # Sonraki tüm <ul> listelerini al
+    for ul in list_section.find_all_next("ul"):
+        holding_links = ul.find_all("a")
+        for link in holding_links:
+            title = link.get_text()
+            href = link.get('href')
+            full_url = "https://tr.wikipedia.org" + href
+            print(f"{title}: {full_url}")      
+            english_page_link = get_english_page_link(link)        
+            if english_page_link is None:
+                print ("english link is none")
+            else:
+                print ("english link is" + english_page_link)
+                subsidiaries = get_subsidiaries(english_page_link)
+                if subsidiaries:
+                    print("Subsidiaries:")
+                    for subsidiary in subsidiaries:
+                        print("subsidiary " + subsidiary)
+                #else:
+                    # print("No subsidiaries found or no infobox present.")
 
-    holding_data = {}
-    # Listede tekrarlayan ve gereksiz elemanları çıkarmak için set kullanabiliriz
-    holding_sirketler = list(set(holding_sirketler))
-
-    # Holding şirketler listesini yazdırma
-    print("Türkiye'deki Holding Şirketler:")
-    count = 0
-    for holding in holding_sirketler:
-        print(holding)
-        holding_data[holding] = get_subsidiaries(holding)
-        # Increment the counter
-        print(count)
-        count += 1
-        # Check if 10 items have been processed
-        if count == 100:
+        # Eğer başka bir başlık (örn. <h2>, <h3>) gelirse, döngüyü kır
+        next_tag = ul.find_next_sibling()
+        if next_tag and next_tag.name in ["h2", "h3"]:
             break
 
-    return json.dumps(holding_data, indent=3)
+def get_english_page_link(link):
+    # İngilizce versiyonun URL'sinin başlangıcı
+    english_url_base = "https://en.wikipedia.org/wiki/"
 
-def get_subsidiaries(holding_name):
-    # Wikipedia API URL'si
-    url = "https://en.wikipedia.org/w/api.php"
+    # Bağlantının URL'sini al
+    href = link.get('href')
 
-    # API istek parametreleri
-    params = {
-        "action": "parse",
-        "page": holding_name,
-        "prop": "text",
-        "format": "json"
-    }
-
-    # API isteği gönderme
-    response = requests.get(url, params=params)
-    data = response.json()
-
-    # Sayfa var mı kontrol etme
-    if 'error' in data:
-        print(f"{holding_name} adında bir sayfa bulunamadı.")
-        return
-
-    # Sayfa içeriğini HTML olarak alma
-    html_content = data['parse']['text']['*']
-    soup = BeautifulSoup(html_content, 'html.parser')
-
-    # 'Subsidiaries' başlığını bulma ve altındaki listeyi çekme
-    subsidiaries = []
-    subsidiaries_section = soup.find('span', {'id': 'Subsidiaries'})
-    if subsidiaries_section:
-        list_items = subsidiaries_section.find_next('ul').find_all('li')
-        subsidiaries = [item.get_text() for item in list_items]
+    # Bağlantının tam URL'sini oluştur
+    if not ("https" or "wikipedia.org") in href:
+        full_url = "https://tr.wikipedia.org" + href
     else:
-        print("Subsidiaries section not found.")
+        full_url = href
 
-    # İştirakleri yazdırma
-    print("Sabancı Holding İştirakleri:")
-    for subsidiary in subsidiaries:
-        print("subsidiary " + subsidiary)
-    
+    # Bağlantının hedef sayfasını çek
+    response = requests.get(full_url)
+    soup = BeautifulSoup(response.content, "html.parser")
+
+    # Dil seçeneklerini kontrol et
+    interwiki_links = soup.find_all("a", {"class": "interlanguage-link-target"})
+    for interwiki_link in interwiki_links:
+        language_code = interwiki_link.get('lang')
+        if language_code == 'en':
+            # İngilizce versiyonu bulduk, URL'yi döndür
+            #print ("İngilizce versiyonu bulduk, URL'yi döndür")
+            english_page_link = interwiki_link.get('href')
+            return english_page_link
+
+    # İngilizce versiyon bulunamadı
+    return None
+
+def get_subsidiaries(english_page_url):
+    # Sayfanın içeriğini çek
+    response = requests.get(english_page_url)
+    soup = BeautifulSoup(response.content, "html.parser")
+
+    # Infobox'ı bul
+    infobox = soup.find("table", {"class": "infobox"})
+    if not infobox:
+        return None  # Infobox bulunamadı
+
+    # Infobox'taki "subsidiaries" satırını bul
+    subsidiaries_row = None
+    for row in infobox.find_all("tr"):
+        header = row.find("th")
+        if header and "subsidiaries" in header.get_text().lower():
+            subsidiaries_row = row
+            break
+
+    if not subsidiaries_row:
+        return None  # "Subsidiaries" satırı bulunamadı
+
+    # Subsidiaries listesini çıkar
+    subsidiaries = []
+    for item in subsidiaries_row.find("td").find_all("a"):
+        subsidiaries.append(item.get_text())
+
     return subsidiaries
